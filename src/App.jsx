@@ -1,11 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, lazy, Suspense } from 'react';
 import { STRATA, TRUCKS } from './data.js';
 import { supabase } from './supabase.js';
 import LoginScreen, { GoogleG } from './LoginScreen.jsx';
-import CitizenModule from './CitizenModule.jsx';
-import LeafletMap from './LeafletMap.jsx';
-import DriverModule from './DriverModule.jsx';
-import AdminModule from './AdminModule.jsx';
+
+// Tab modules are loaded on demand so heavy deps (e.g. Leaflet in the map)
+// stay out of the initial bundle until their tab is opened.
+const CitizenModule = lazy(() => import('./CitizenModule.jsx'));
+const LeafletMap = lazy(() => import('./LeafletMap.jsx'));
+const DriverModule = lazy(() => import('./DriverModule.jsx'));
+const AdminModule = lazy(() => import('./AdminModule.jsx'));
 
 
 const SESSION_KEY = 'ecoclean_user';
@@ -145,16 +148,18 @@ export default function App() {
 
       {/* MAIN */}
       <main style={{ maxWidth: 1200, margin: '0 auto', padding: '24px 20px', height: 'calc(100vh - 130px)', overflow: 'auto' }}>
-        {activeModule === 'citizen' && <CitizenModule onSubmit={handleNewReport} user={user} subsidyParams={subsidyParams} />}
-        {activeModule === 'map' && (
-          <div style={{ height: '100%' }}>
-            <div style={{ height: 'calc(100% - 0px)', minHeight: 380, borderRadius: 12, overflow: 'hidden' }}>
-              <LeafletMap reports={reports} />
+        <Suspense fallback={<div style={{ padding: 24, color: '#9ca3af', fontSize: 14 }}>Cargando…</div>}>
+          {activeModule === 'citizen' && <CitizenModule onSubmit={handleNewReport} user={user} subsidyParams={subsidyParams} />}
+          {activeModule === 'map' && (
+            <div style={{ height: '100%' }}>
+              <div style={{ height: 'calc(100% - 0px)', minHeight: 380, borderRadius: 12, overflow: 'hidden' }}>
+                <LeafletMap reports={reports} />
+              </div>
             </div>
-          </div>
-        )}
-        {activeModule === 'driver' && <DriverModule reports={reports} trucks={trucks} onStatusChange={handleStatusChange} />}
-        {activeModule === 'admin' && <AdminModule reports={reports} trucks={trucks} subsidyParams={subsidyParams} onStatusChange={handleStatusChange} onSubsidyChange={handleSubsidyChange} />}
+          )}
+          {activeModule === 'driver' && <DriverModule reports={reports} trucks={trucks} onStatusChange={handleStatusChange} />}
+          {activeModule === 'admin' && <AdminModule reports={reports} trucks={trucks} subsidyParams={subsidyParams} onStatusChange={handleStatusChange} onSubsidyChange={handleSubsidyChange} />}
+        </Suspense>
       </main>
     </div>
   );
