@@ -1,0 +1,476 @@
+openapi: 3.1.0
+info:
+  title: EcoClean Connect API
+  version: 0.1.0
+  description: >
+    API REST de EcoClean Connect (backend NestJS sobre Supabase/PostGIS).
+    Todas las mutaciones de negocio pasan por esta API; el cliente nunca usa la
+    service key. Autenticación con JWT de Supabase (Bearer). Diseño:
+    ~/.claude/plans/lively-munching-cake.md
+servers:
+  - url: /api/v1
+tags:
+  - name: Auth
+  - name: Ciudadano
+  - name: Conductor
+  - name: Alcaldía
+  - name: Privacidad
+  - name: Sistema
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  responses:
+    Unauthorized:
+      description: No autenticado
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Forbidden:
+      description: Sin permisos para el recurso
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+  parameters:
+    RequestId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  schemas:
+    Error:
+      type: object
+      properties:
+        statusCode: { type: integer }
+        message: { type: string }
+        error: { type: string }
+    Profile:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        role:
+          type: string
+          enum: [ciudadano, conductor, admin_alcaldia, operador_empresa, super_admin]
+        full_name: { type: string }
+        email: { type: string, format: email }
+        phone: { type: string, nullable: true }
+        municipality_id: { type: string, format: uuid, nullable: true }
+    LatLng:
+      type: object
+      required: [lat, lng]
+      properties:
+        lat: { type: number }
+        lng: { type: number }
+    GeocodeResult:
+      type: object
+      properties:
+        address: { type: string }
+        location: { $ref: '#/components/schemas/LatLng' }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        in_service_area: { type: boolean }
+        municipality_id: { type: string, format: uuid, nullable: true }
+    Quote:
+      type: object
+      properties:
+        tarifa_base: { type: integer }
+        subsidy_pct: { type: integer }
+        costo_final: { type: integer }
+    RequestCreate:
+      type: object
+      required: [waste_type_id, peso, municipality_id, location, scheduled_date, scheduled_window, stratum, address]
+      properties:
+        waste_type_id: { type: string, format: uuid }
+        peso: { type: integer, minimum: 0 }
+        municipality_id: { type: string, format: uuid }
+        address: { type: string }
+        location: { $ref: '#/components/schemas/LatLng' }
+        scheduled_date: { type: string, format: date }
+        scheduled_window: { type: string, enum: [am, pm, late] }
+        stratum: { type: integer, minimum: 1, maximum: 6 }
+        idempotency_key: { type: string }
+    Request:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string }
+        citizen_id: { type: string, format: uuid }
+        waste_type_id: { type: string, format: uuid }
+        peso: { type: integer }
+        municipality_id: { type: string, format: uuid }
+        address: { type: string }
+        location: { $ref: '#/components/schemas/LatLng' }
+        scheduled_date: { type: string, format: date }
+        scheduled_window: { type: string, enum: [am, pm, late] }
+        status:
+          type: string
+          enum: [pendiente, asignado, en_ruta, recolectado, en_deposito, cerrado, cancelado]
+        tarifa_base: { type: integer }
+        subsidy_pct: { type: integer }
+        costo_final: { type: integer }
+        assigned_driver_id: { type: string, format: uuid, nullable: true }
+        assigned_truck_id: { type: string, format: uuid, nullable: true }
+        needs_review: { type: boolean }
+    UploadUrl:
+      type: object
+      properties:
+        upload_url: { type: string, format: uri }
+        storage_path: { type: string }
+        expires_at: { type: string, format: date-time }
+    DSAR:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, enum: [acceso, rectificacion, supresion, revocacion, oposicion] }
+        status: { type: string, enum: [recibido, en_tramite, resuelto, rechazado] }
+        received_at: { type: string, format: date-time }
+        due_at: { type: string, format: date-time, nullable: true }
+
+security:
+  - bearerAuth: []
+
+paths:
+  /health:
+    get:
+      tags: [Sistema]
+      security: []
+      summary: Healthcheck
+      responses: { '200': { description: OK } }
+
+  /me:
+    get:
+      tags: [Auth]
+      summary: Perfil y rol del usuario autenticado
+      responses:
+        '200':
+          description: Perfil
+          content: { application/json: { schema: { $ref: '#/components/schemas/Profile' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/consent:
+    post:
+      tags: [Auth, Privacidad]
+      summary: Registrar/actualizar consentimiento granular (Ley 1581)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [policy_version_id, purpose, granted]
+              properties:
+                policy_version_id: { type: string, format: uuid }
+                purpose: { type: string, enum: [servicio, ubicacion_gps, fotos, comunicaciones] }
+                granted: { type: boolean }
+      responses: { '204': { description: Registrado } }
+
+  /privacy/policy:
+    get:
+      tags: [Privacidad]
+      security: []
+      summary: Versión vigente del aviso de privacidad / política
+      responses: { '200': { description: Política vigente } }
+
+  /geocoding/forward:
+    post:
+      tags: [Ciudadano]
+      summary: Geocodificación directa + validación de dirección
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [address], properties: { address: { type: string } } }
+      responses:
+        '200':
+          description: Resultado
+          content: { application/json: { schema: { $ref: '#/components/schemas/GeocodeResult' } } }
+
+  /geocoding/reverse:
+    post:
+      tags: [Ciudadano]
+      summary: Geocodificación inversa (coordenadas → dirección)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LatLng' }
+      responses:
+        '200':
+          description: Resultado
+          content: { application/json: { schema: { $ref: '#/components/schemas/GeocodeResult' } } }
+
+  /requests/quote:
+    post:
+      tags: [Ciudadano]
+      summary: Cotización de tarifa (server-side, no persiste)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [waste_type_id, peso, stratum]
+              properties:
+                waste_type_id: { type: string, format: uuid }
+                peso: { type: integer }
+                stratum: { type: integer, minimum: 1, maximum: 6 }
+      responses:
+        '200':
+          description: Cotización
+          content: { application/json: { schema: { $ref: '#/components/schemas/Quote' } } }
+
+  /requests:
+    post:
+      tags: [Ciudadano]
+      summary: Crear solicitud (valida área PostGIS, congela precio, encola IA)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RequestCreate' }
+      responses:
+        '201':
+          description: Creada
+          content: { application/json: { schema: { $ref: '#/components/schemas/Request' } } }
+        '422': { description: Fuera del área de servicio o datos inválidos }
+
+  /requests/mine:
+    get:
+      tags: [Ciudadano]
+      summary: Seguimiento de las solicitudes propias
+      responses:
+        '200':
+          description: Lista
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Request' } }
+
+  /requests/{id}:
+    get:
+      tags: [Ciudadano]
+      summary: Detalle de una solicitud (dueño o roles operativos)
+      parameters: [ { $ref: '#/components/parameters/RequestId' } ]
+      responses:
+        '200':
+          description: Detalle
+          content: { application/json: { schema: { $ref: '#/components/schemas/Request' } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /requests/{id}/images/upload-url:
+    post:
+      tags: [Ciudadano]
+      summary: Emitir signed upload URL para imagen
+      parameters: [ { $ref: '#/components/parameters/RequestId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, content_type]
+              properties:
+                kind: { type: string, enum: [residuo, evidencia_recogida, evidencia_entrega] }
+                content_type: { type: string }
+      responses:
+        '200':
+          description: URL firmada
+          content: { application/json: { schema: { $ref: '#/components/schemas/UploadUrl' } } }
+
+  /driver/orders:
+    get:
+      tags: [Conductor]
+      summary: Órdenes asignadas al conductor autenticado
+      responses:
+        '200':
+          description: Lista
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Request' } }
+
+  /driver/routes/today:
+    get:
+      tags: [Conductor]
+      summary: Ruta óptima del día
+      responses: { '200': { description: Ruta con paradas ordenadas } }
+
+  /driver/location:
+    post:
+      tags: [Conductor]
+      summary: Ping de ubicación del conductor
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/LatLng' } } }
+      responses: { '204': { description: OK } }
+
+  /requests/{id}/evidence:
+    post:
+      tags: [Conductor]
+      summary: Registrar evidencia (recogida/entrega) + transición de estado
+      parameters: [ { $ref: '#/components/parameters/RequestId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, storage_path]
+              properties:
+                kind: { type: string, enum: [evidencia_recogida, evidencia_entrega] }
+                storage_path: { type: string }
+      responses: { '200': { description: Registrado } }
+
+  /requests/{id}/status:
+    patch:
+      tags: [Conductor, Alcaldía]
+      summary: Actualizar estado (validado por máquina de estados + rol)
+      parameters: [ { $ref: '#/components/parameters/RequestId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [asignado, en_ruta, recolectado, en_deposito, cerrado, cancelado]
+                note: { type: string }
+      responses:
+        '200': { description: Actualizado }
+        '409': { description: Transición inválida }
+
+  /requests/{id}/assign:
+    post:
+      tags: [Alcaldía]
+      summary: Asignar conductor/camión (dispara notificación email)
+      parameters: [ { $ref: '#/components/parameters/RequestId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [driver_id, truck_id]
+              properties:
+                driver_id: { type: string, format: uuid }
+                truck_id: { type: string, format: uuid }
+      responses: { '200': { description: Asignado } }
+
+  /dashboard/summary:
+    get:
+      tags: [Alcaldía]
+      summary: KPIs del dashboard
+      responses: { '200': { description: KPIs } }
+
+  /dashboard/activity:
+    get:
+      tags: [Alcaldía]
+      summary: Actividad reciente
+      responses: { '200': { description: Lista de actividad } }
+
+  /reports/metrics:
+    get:
+      tags: [Alcaldía]
+      summary: Reportes y métricas (agregados)
+      parameters:
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+        - { name: municipality, in: query, schema: { type: string, format: uuid } }
+      responses: { '200': { description: Métricas } }
+
+  /drivers:
+    get:
+      tags: [Alcaldía]
+      summary: Listar conductores
+      responses: { '200': { description: Lista } }
+    post:
+      tags: [Alcaldía]
+      summary: Crear conductor
+      responses: { '201': { description: Creado } }
+
+  /drivers/{id}:
+    patch:
+      tags: [Alcaldía]
+      summary: Actualizar conductor
+      parameters: [ { $ref: '#/components/parameters/RequestId' } ]
+      responses: { '200': { description: Actualizado } }
+    delete:
+      tags: [Alcaldía]
+      summary: Desactivar conductor
+      parameters: [ { $ref: '#/components/parameters/RequestId' } ]
+      responses: { '204': { description: OK } }
+
+  /municipalities:
+    get:
+      tags: [Alcaldía]
+      summary: Gestión de municipios
+      responses: { '200': { description: Lista } }
+    post:
+      tags: [Alcaldía]
+      summary: Crear municipio (incl. geometría)
+      responses: { '201': { description: Creado } }
+
+  /waste-types:
+    get:
+      tags: [Alcaldía]
+      summary: Gestión de tipos de residuo y tarifas
+      responses: { '200': { description: Lista } }
+    post:
+      tags: [Alcaldía]
+      summary: Crear tipo de residuo
+      responses: { '201': { description: Creado } }
+
+  /strata:
+    get:
+      tags: [Alcaldía]
+      summary: Parámetros de subsidio por estrato (versionados)
+      responses: { '200': { description: Lista } }
+    post:
+      tags: [Alcaldía]
+      summary: Nueva versión de subsidio por estrato
+      responses: { '201': { description: Creado } }
+
+  /trucks:
+    get:
+      tags: [Alcaldía]
+      summary: Monitoreo de camiones
+      responses: { '200': { description: Lista } }
+
+  /privacy/requests:
+    post:
+      tags: [Privacidad]
+      summary: Ejercer un derecho del titular (habeas data)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type]
+              properties:
+                type: { type: string, enum: [acceso, rectificacion, supresion, revocacion, oposicion] }
+                notes: { type: string }
+      responses:
+        '201':
+          description: Solicitud creada (con due_at calculado)
+          content: { application/json: { schema: { $ref: '#/components/schemas/DSAR' } } }
+    get:
+      tags: [Privacidad]
+      summary: Estado de las solicitudes propias del titular
+      responses:
+        '200':
+          description: Lista
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/DSAR' } }
+
+  /privacy/export:
+    get:
+      tags: [Privacidad]
+      summary: Exportar todos los datos del titular (derecho de acceso)
+      responses: { '200': { description: Export de datos del titular } }
+
+  /admin/privacy/requests:
+    get:
+      tags: [Alcaldía, Privacidad]
+      summary: Bandeja de DSAR del responsable (con SLA)
+      responses: { '200': { description: Lista con due_at } }
